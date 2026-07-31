@@ -1612,8 +1612,7 @@ class SPLB32():
     def _sta_ind_x(self):
         zp = self._read_mem(self._PC) + self._X
         addr = self._read_mem(zp & 0xFF) | (self._read_mem((zp + 1) & 0xFF) << 8)
-        value = self._read_mem(addr)
-        self._write_mem(value, self._A)
+        self._write_mem(addr, self._A)
         self._PC = (self._PC + 1) & 0xFFFF
         return 6
     

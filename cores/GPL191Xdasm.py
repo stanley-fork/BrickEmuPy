@@ -281,7 +281,7 @@ class GPL191Xdasm():
                     f.write((ADDR % i) + ":\t" + (line[1] + "\t;" + line[0]).expandtabs(30) + "\n")
 
     def _disassemble(self, pc, listing, rom):    
-        while (pc >= 0 and pc < len(listing) and listing[pc] is None):
+        while (pc >= 400 and pc < len(listing) and listing[pc] is None):
             opcode = rom.get_byte(pc)
             instruction = self._instructions[opcode]
             instruction_size = instruction[1]

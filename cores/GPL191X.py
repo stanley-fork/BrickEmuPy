@@ -22,14 +22,16 @@ SFR_TIMER_CTRL_TM1_MASK = 0x40
 SFR_TIMER_CTRL_TM1_32K = 0x40
 SFR_TIMER_CTRL_TM1_ROSC = 0x00
 
-SFR_TIMER_CTRL_CNT0_SRC1_MASK = 0x0C
-SFR_TIMER_CTRL_CNT0_SRC1_CD1 = 0x00
-SFR_TIMER_CTRL_CNT0_SRC1_VDD = 0x01
-SFR_TIMER_CTRL_CNT0_SRC1_TIMEBASEH = 0x02
-SFR_TIMER_CTRL_CNT0_SRC1_CLK128 = 0x03
-SFR_TIMER_CTRL_CNT0_SRC2_CD0 = 0x00
-SFR_TIMER_CTRL_CNT0_SRC2_ROSC = 0x02
-SFR_TIMER_CTRL_CNT0_SRC2_CLK32 = 0x03
+SFR_TIMER_CTRL_CNT0_SRCB_MASK = 0x0C
+SFR_TIMER_CTRL_CNT0_SRCB_CD1 = 0x00
+SFR_TIMER_CTRL_CNT0_SRCB_VDD = 0x04
+SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH = 0x08
+SFR_TIMER_CTRL_CNT0_SRCB_CLK128 = 0x0C
+SFR_TIMER_CTRL_CNT0_SRCA_MASK = 0x03
+SFR_TIMER_CTRL_CNT0_SRCA_CD0 = 0x00
+SFR_TIMER_CTRL_CNT0_SRCA_VDD = 0x01
+SFR_TIMER_CTRL_CNT0_SRCA_ROSC = 0x02
+SFR_TIMER_CTRL_CNT0_SRCA_CLK32 = 0x03
 
 SFR_WAKEUP_CTRL_EXT = 0x01
 SFR_WAKEUP_CTRL_TIME_BASEL = 0x02
@@ -64,7 +66,7 @@ SFR_TIMEBASE_L_TBL = (0x1F, 0x3F)
 SFR_AUDIO_CTRL_AUDIO_ENBL = 0x80
 SFR_AUDIO_CTRL_TONE_MODE = 0x40
 SFR_AUDIO_CTRL_DATA_SRC_MASK = 0x03
-SFR_AUDIO_CTRL_TM1_OVFLW = 0x00 #TODO: Check if this is correct, as it is not documented in the datasheet
+SFR_AUDIO_CTRL_DIRECT = 0x00
 SFR_AUDIO_CTRL_TM0_OVFLW = 0x01
 SFR_AUDIO_CTRL_TM1_OVFLW = 0x02
 SFR_AUDIO_CTRL_TM01_OVFLW = 0x03
@@ -593,48 +595,58 @@ class GPL191X():
         if (self._TIMER_CTRL & SFR_TIMER_CTRL_ENABLE):
             self._TM0_counter -= exec_cycles
             while (self._TM0_counter <= 0):
-                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_MASK == SFR_TIMER_CTRL_TM0_ROSC):
-                    self._TM0_counter = 1
-                    self._TM0 += exec_cycles
-                elif (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_MASK == SFR_TIMER_CTRL_TM0_TIMER1):
-                    #TODO: Implement SFR_TIMER_CTRL_TM0_TIMER1
-                    print("to-do SFR_TIMER_CTRL_TM0_TIMER1")
-                    pass
+                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_COUNTER_MODE):
+                    #TODO: add support for the other counter sources
+                    srcB = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCB_MASK
+                    srcA = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCA_MASK
+                    if (srcA == SFR_TIMER_CTRL_CNT0_SRCA_CLK32):
+                        if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_VDD):
+                            self._TM0_counter += self._sub_clock_div
+                        elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
+                            self._TM0_counter += self._sub_clock_div * (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[(self._TIME_BASE & SFR_TIMEBASE_H_MASK)])
+                        elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
+                            self._TM0_counter += self._sub_clock_div * (SUB_CLOCK // 128)
+                        else:
+                            self._TM0_counter += self._sub_clock_div
+                            if not(self._port_read("CD") & 0x02):
+                                break
+                        self._TM0 += 1
+                    elif (srcA == SFR_TIMER_CTRL_CNT0_SRCA_ROSC):
+                        self._TM0_counter = 1
+                        self._TM0 += exec_cycles
+                else:
+                    #TODO: add support for the other timer sources
+                    if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_MASK == SFR_TIMER_CTRL_TM0_ROSC):
+                        self._TM0_counter = 1
+                        self._TM0 += exec_cycles
+
                 while (self._TM0 > 0xFFFF):
                     self._TM0 -= 0x10000 - self._TM0_PRELOAD
                     self._IREQ |= SFR_INT_CTRL_TIMER0
                     self._WAKEUPREQ |= SFR_WAKEUP_CTRL_TIMER0 & self._WAKEUP_CTRL
 
                     if (self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        if (self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_TM0_OVFLW):
-                            self._sound.toggle(0)
-                    if (self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        if (self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_TM0_OVFLW):
-                            self._sound.toggle(1)
+                        self._sound.toggle(0)
 
             self._TM1_counter -= exec_cycles
             while (self._TM1_counter <= 0):
-                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM1_MASK == SFR_TIMER_CTRL_TM1_ROSC):
-                    self._TM1_counter = 1
-                    self._TM1 += exec_cycles
-                elif (self._TIMER_CTRL & SFR_TIMER_CTRL_TM1_MASK == SFR_TIMER_CTRL_TM1_32K):
+                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM1_32K):
                     self._TM1_counter += self._sub_clock_div
                     self._TM1 += 1
+                else:
+                    self._TM1_counter = 1
+                    self._TM1 += exec_cycles
 
                 while (self._TM1 > 0xFFFF):
                     self._TM1 -= 0x10000 - self._TM1_PRELOAD
-                    
+
                     if not(self._NMI_CTRL & SFR_NMI_CTRL_TIMER1):
                         self._NMI()
                     else:
                         self._IREQ |= SFR_INT_CTRL_TIMER1
 
-                    if (self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        if (self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_DATA_SRC_MASK != SFR_AUDIO_CTRL_TM0_OVFLW):
-                            self._sound.toggle(0)
                     if (self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        if (self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_DATA_SRC_MASK != SFR_AUDIO_CTRL_TM0_OVFLW):
-                            self._sound.toggle(1)
+                        self._sound.toggle(1)
 
         self._T64HZ_counter -= exec_cycles
         while (self._T64HZ_counter <= 0):
@@ -645,7 +657,7 @@ class GPL191X():
             if (not(self._T64HZ & SFR_TIMEBASE_H_TBL[time_base_h])):
                 self._IREQ |= SFR_INT_CTRL_TIME_BASEH
                 self._WAKEUPREQ |= SFR_WAKEUP_CTRL_TIME_BASEH & self._WAKEUP_CTRL
-            
+
             time_base_l = (self._TIME_BASE & SFR_TIMEBASE_L_MASK) >> SFR_TIMEBASE_L_SHIFT
             if (not(self._T64HZ & SFR_TIMEBASE_L_TBL[time_base_l])):
                 self._IREQ |= SFR_INT_CTRL_TIME_BASEL
@@ -1496,8 +1508,7 @@ class GPL191X():
     def _sta_ind_x(self):
         zp = self._read_mem(self._PC) + self._X
         addr = self._read_mem(zp & 0xFF) | (self._read_mem((zp + 1) & 0xFF) << 8)
-        value = self._read_mem(addr)
-        self._write_mem(value, self._A)
+        self._write_mem(addr, self._A)
         self._PC = (self._PC + 1) & 0xFFFF
         return 6
     
