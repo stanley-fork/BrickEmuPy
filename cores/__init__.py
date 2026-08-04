@@ -160,5 +160,9 @@ cores_map = {
     "GPL191X": {
         "core": GPL191X,
         "dasm": GPL191Xdasm
+    },
+    "SPL61X": {
+        "core": GPL191X,
+        "dasm": GPL191Xdasm
     }
 }

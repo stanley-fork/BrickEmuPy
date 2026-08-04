@@ -245,30 +245,31 @@ class GPL191Xdasm():
         return addr & 0x7FFF
 
     def disassemble(self, rom):
-        if (rom.size() > 0):
-            self._rom_offset = 0
-            listing = [None] * rom.size()
+        self._rom = rom
+        self._rom_size = len(rom)
+        if (self._rom_size > 0):
+            listing = [None] * self._rom_size
             
             roots = []
             for i in range(7):
                 vector = 0x7FFE - i * 2
                 if (vector > 0):
-                    addr = (rom.get_byte(vector) | (rom.get_byte(vector + 1) << 8))
+                    addr = (rom[vector % self._rom_size] | (rom[(vector + 1) % self._rom_size] << 8))
                     if (addr != 0xFFFF):
-                        roots += (self.get_addr(0, addr), )
+                        roots.append((addr & 0x7FFF) % self._rom_size)
             
             if (self._roots):
                 roots += tuple(self._roots)
             
             for pc in roots:
-                listing = self._disassemble(pc, listing, rom)
+                listing = self._disassemble(pc, listing)
 
-            result = [()] * rom.size()
+            result = [()] * self._rom_size
             for i in range(len(listing)):
                 if (listing[i] is None):
-                    byte = rom.get_byte(i)
+                    byte = rom[i % self._rom_size]
                     listing[i] = (1, byte, 'db 0x%0.2X' % byte)
-                result[i + self._rom_offset] = ("%0.2X" % listing[i][1], listing[i][2])
+                result[i] = ("%0.2X" % listing[i][1], listing[i][2])
             return {"LISTING": tuple(result)}
         else:
             return {}
@@ -280,22 +281,20 @@ class GPL191Xdasm():
                 if (line):
                     f.write((ADDR % i) + ":\t" + (line[1] + "\t;" + line[0]).expandtabs(30) + "\n")
 
-    def _disassemble(self, pc, listing, rom):    
+    def _disassemble(self, pc, listing):    
         while (pc >= 400 and pc < len(listing) and listing[pc] is None):
-            opcode = rom.get_byte(pc)
+            opcode = self._rom[pc % self._rom_size]
             instruction = self._instructions[opcode]
             instruction_size = instruction[1]
-            if (instruction_size > 1):
-                opcode = rom.get_bytes(pc, instruction_size)
+            for i in range(1, instruction_size, 1):
+                opcode = (opcode << 8 * (instruction_size - i)) | self._rom[(pc + i) % self._rom_size]
             next_pc, symbol = instruction[0](self, pc, opcode)
             listing[pc] = (instruction_size, opcode, symbol)
-            while ((instruction_size > 1)  and ((pc + 1) < len(listing))):
-                instruction_size -= 1
-                pc += 1
-                listing[pc] = (1, rom.get_byte(pc), '')
+            for i in range(instruction_size - 1):
+                listing[(pc + i + 1) % self._rom_size] = (1, self._rom[(pc + i + 1) % self._rom_size], '')
             pc = next_pc[0]
             if (len(next_pc) > 1):
-                listing = self._disassemble(next_pc[1], listing, rom)
+                listing = self._disassemble(next_pc[1], listing)
         return listing
 
     def _brk(self, pc, opcode):
@@ -360,7 +359,7 @@ class GPL191Xdasm():
         bit = (opcode >> 21) & 0x7
         zp = (opcode >> 8) & 0xFF
         addr = pc + 3 + (opcode & 0xFF)
-        return (pc + 3, addr), "bbc " + BIT_ZP % (bit, zp) + ", " + ADDR % (self._rom_offset + addr)
+        return (pc + 3, addr), "bbc " + BIT_ZP % (bit, zp) + ", " + ADDR % (addr)
 
     def _clc(self, pc, opcode):
         return (pc + 1,), "clc"
@@ -389,8 +388,8 @@ class GPL191Xdasm():
         return (pc + 2,), "clb " + BIT_ZP % (bit, opcode & 0xFF)
 
     def _jsr_abs(self, pc, opcode):
-        addr = ((opcode >> 8) & 0xFF) | ((opcode & 0xFF) << 8)
-        return (pc + 3, self.get_addr(pc, addr)), "jsr " + ADDR % self.get_addr(pc, addr)
+        addr = self.get_addr(pc, ((opcode >> 8) & 0xFF) | ((opcode & 0xFF) << 8))
+        return (pc + 3, addr), "jsr " + ADDR % addr
 
     def _and_ind_x(self, pc, opcode):
         return (pc + 2,), "and " + IND_X % (opcode & 0xFF)
@@ -483,8 +482,8 @@ class GPL191Xdasm():
         return (pc + 1,), "lsr A"
 
     def _jmp_abs(self, pc, opcode):
-        addr = ((opcode >> 8) & 0xFF) | ((opcode & 0xFF) << 8)
-        return (self.get_addr(pc, addr),), "jmp " + ADDR % self.get_addr(pc, addr)
+        addr = self.get_addr(pc, ((opcode >> 8) & 0xFF) | ((opcode & 0xFF) << 8))
+        return (addr,), "jmp " + ADDR % addr
 
     def _eor_abs(self, pc, opcode):
         abs = ((opcode >> 8) & 0xFF) | ((opcode & 0xFF) << 8)
@@ -584,8 +583,8 @@ class GPL191Xdasm():
         return (pc + 3,), "ror " + ABS_X % abs 
 
     def _bra(self, pc, opcode):
-        addr = (pc + 2 + (opcode & 0xFF) - ((opcode & 0x80) << 1)) & 0xFFFFF
-        return (addr,), "bra " + ADDR % self.get_addr(pc, addr)
+        addr = self.get_addr(pc, (pc + 2 + (opcode & 0xFF) - ((opcode & 0x80) << 1)) & 0xFFFFF)
+        return (addr,), "bra " + ADDR % addr
 
     def _sta_ind_x(self, pc, opcode):
         return (pc + 2,), "sta " + IND_X % (opcode & 0xFF)

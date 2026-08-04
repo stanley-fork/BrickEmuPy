@@ -1,5 +1,4 @@
-from .rom import ROM
-from .SPLB32sound import SPLB32sound
+from .GPL191Xsound import GPL191Xsound
 
 SUB_CLOCK = 32768
 
@@ -8,8 +7,6 @@ SP = 0x100
 VADDR_NMI = 0x7FFA
 VADDR_RESET = 0x7FFC
 VADDR_IRQ = 0x7FFE
-
-SFR_IO_PORTD_MASK = 0x3F
 
 SFR_TIMER_CTRL_ENABLE = 0x80
 SFR_TIMER_CTRL_TM0_COUNTER_MODE = 0x10
@@ -75,22 +72,17 @@ SFR_CPU_DIV_DEFAULT = 0x02
 
 SFR_LCD_CTRL_ON = 0x02
 
-SFR_OFFSET = 0x0
-SFR_SIZE = 0x40
 CPU_RAM_OFFSET = 0x40
 RAM_SIZE = 0x2C0
 DPRAM_OFFSET = 0x300
 DPRAM_SIZE = 0x80
-
-ROM_OFFSET = 0x0400
-ROM_BANK_OFFSET = 0x8000
     
 class GPL191X():
     def __init__(self, mask, clock, interconnect):
         self._interconnect = interconnect
         self._interconnect.register_port_device(self)
 
-        self._ROM = ROM(mask['rom_path'])
+        self._open_rom(mask['rom_path'])
 
         self._instr_counter = 0
 
@@ -108,7 +100,7 @@ class GPL191X():
         self._clock = clock
         self._sub_clock_div = clock / SUB_CLOCK
 
-        self._sound = SPLB32sound(interconnect)
+        self._sound = GPL191Xsound(interconnect, clock)
         
         self.reset()
 
@@ -373,10 +365,17 @@ class GPL191X():
             GPL191X._dummy
         )
 
+    def _open_rom(self, path):
+        if (path != None):
+            try:
+                with open(path, "rb") as bin_f:
+                    self._mem = bytearray(bin_f.read())
+                    self._mem_size = len(self._mem)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(e.errno, "ROM file not found, please add the required ROM to this path", e.filename)
+
     def _get_rom_addr(self, addr):
-        if (addr >= 0x8000):
-            return addr & 0x7FFF | self._ROM_BANK
-        return addr & 0x7FFF
+        return (addr & 0x7FFF) | (self._BANK * (addr & 0x8000))
     
     def examine(self):
         return {
@@ -393,8 +392,8 @@ class GPL191X():
             "IF": self._IF,
             "ZF": self._ZF,
             "CF": self._CF,
-            "RAM": self._RAM,
-            "LCDRAM": self._DPRAM,
+            "RAM": self._mem[CPU_RAM_OFFSET:CPU_RAM_OFFSET+RAM_SIZE],
+            "LCDRAM": self._mem[DPRAM_OFFSET:DPRAM_OFFSET+DPRAM_SIZE],
             "SFR": (
                 0, self._PDIR["CD"],
                 0, self._PDIR["AB"],
@@ -402,7 +401,7 @@ class GPL191X():
                 self._port_read("CD"), self._PLATCH["CD"],
                 self._port_read("EF"), self._PLATCH["EF"],
                 -1, self._PDIR["EF"],
-                self._ROM_BANK >> 15, self._ROM_BANK >> 15,
+                self._BANK, self._BANK,
                 self._WAKEUPREQ, self._WAKEUP_CTRL,
                 -1, self._ENTER_SLEEP,
                 self._T64HZ & 0xFF, self._TIME_BASE,
@@ -428,7 +427,7 @@ class GPL191X():
 
     def edit_state(self, state):
         if ("PC16" in state):
-            self._ROM_BANK = (state["PC16"]) & 0x78000
+            self._BANK = (state["PC16"] >> 15) & 0x3
             self._PC = state["PC16"] & 0x7FFF
         if ("A" in state):
             self._A = state["A"] & 0xFF
@@ -454,11 +453,11 @@ class GPL191X():
             self._CF = state["CF"]
         if ("RAM" in state):
             for i, value in state["RAM"].items():
-                self._RAM[i] = value & 0xFF
+                self._mem[(CPU_RAM_OFFSET + i) % self._mem_size] = value & 0xFF
         if ("LCDRAM" in state):
             for i, value in state["LCDRAM"].items():
                 if (i < DPRAM_SIZE):
-                    self._DPRAM[i] = value & 0xFF
+                    self._mem[(DPRAM_OFFSET + i) % self._mem_size] = value & 0xFF
         if ("SFR" in state):
             for i, value in state["SFR"].items():
                 if (i < len(self._sfr_tbl)) and (i % 2):
@@ -466,7 +465,9 @@ class GPL191X():
 
     def reset(self):
         self._TM0_counter = 0
+        self._TM0_div = 0
         self._TM1_counter = 0
+        self._TM1_div = 0
         self._T64HZ_counter = 0
         self._T64HZ = 0
         self._T128HZ_counter = 0
@@ -488,10 +489,7 @@ class GPL191X():
 
         self._CPU_ENBL = 1
 
-        self._RAM = [0] * RAM_SIZE
-        self._DPRAM = [0] * DPRAM_SIZE
-
-        self._ROM_BANK = 0
+        self._BANK = 0
         self._WAKEUP_CTRL = 0
         self._WAKEUPREQ = 0
         self._ENTER_SLEEP = 0
@@ -522,27 +520,20 @@ class GPL191X():
         self._AUDIO_CH0_DATA = 0
         self._AUDIO_CH1_CTRL = 0
         self._AUDIO_CH1_DATA = 0
-        self._BYTE_MIRROR = 0
-        self._NIBBLE_SWAP = 0
-
         self._LCD_CTRL = 0
 
-        self._addr_reset = self._ROM.get_word_LSB(VADDR_RESET)
-        self._addr_irq = self._ROM.get_word_LSB(VADDR_IRQ)
-        self._addr_nmi = self._ROM.get_word_LSB(VADDR_NMI)
-
-        self._PC = self._addr_reset
+        self._PC = (self._mem[(VADDR_RESET + 1) % self._mem_size] << 8) | self._mem[VADDR_RESET % self._mem_size]
 
     def pc(self):
         return self._get_rom_addr(self._PC)
     
     def get_VRAM(self):
         if (self._CLK32K_ENABLE and (self._LCD_CTRL & SFR_LCD_CTRL_ON)):
-            return tuple(self._DPRAM)
+            return tuple(self._mem[DPRAM_OFFSET:DPRAM_OFFSET+DPRAM_SIZE])
         return tuple([0x00] * DPRAM_SIZE)
 
     def get_ROM(self):
-        return self._ROM
+        return self._mem
     
     def istr_counter(self):
         return self._instr_counter
@@ -567,6 +558,7 @@ class GPL191X():
             if ((port == "CD") and (mask & 0x02)):
                 if ((prev_port & 0x02) > (self._port_read(port) & 0x02)):
                     self._IREQ |= SFR_INT_CTRL_EXT
+                self._update_timers_div()
             if (port == "EF"):
                 if (self._port_read(port) & mask):
                     self._WAKEUPREQ |= SFR_WAKEUP_CTRL_EXT & self._WAKEUP_CTRL
@@ -579,7 +571,8 @@ class GPL191X():
         self._write_mem(self._SP | SP, self._get_ps())
         self._SP = (self._SP - 1) & 0xFF
         self._IF = 1
-        self._PC = self._addr_irq
+        addr = VADDR_IRQ | self._BANK * (self._PC & 0x8000)
+        self._PC = (self._mem[(addr + 1) % self._mem_size] << 8) | self._mem[addr % self._mem_size]
 
     def _NMI(self):
         if (self._CPU_ENBL):
@@ -589,71 +582,108 @@ class GPL191X():
             self._SP = (self._SP - 1) & 0xFF
             self._write_mem(self._SP | SP, self._get_ps())
             self._SP = (self._SP - 1) & 0xFF
-            self._PC = self._addr_nmi
+            addr = VADDR_NMI | self._BANK * (self._PC & 0x8000)
+            self._PC = (self._mem[(addr + 1) % self._mem_size] << 8) | self._mem[addr % self._mem_size]
+
+    def _update_audio_div(self):
+        if (self._TIMER_CTRL & SFR_TIMER_CTRL_ENABLE and self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL 
+            and self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
+            div = self._TM0_div * (0x10000 - self._TM0_PRELOAD) * 2
+            self._sound.tone(0, div)
+        else:
+            self._sound.stop(0)
+        
+        if (self._TIMER_CTRL & SFR_TIMER_CTRL_ENABLE and self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL 
+             and self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
+            div = self._TM1_div * (0x10000 - self._TM1_PRELOAD) * 2
+            self._sound.tone(1, div)
+        else:
+            self._sound.stop(1)
+
+    def _update_timers_div(self):
+        if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM1_32K):
+            self._TM1_div = self._sub_clock_div
+        else:
+            self._TM1_div = 1
+
+        self._TM0_div = 0
+        if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_COUNTER_MODE):
+            srcB = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCB_MASK
+            srcA = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCA_MASK
+
+            if (srcA == SFR_TIMER_CTRL_CNT0_SRCA_CLK32):
+                if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_VDD):
+                    self._TM0_div = self._sub_clock_div
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
+                    time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK
+                    self._TM0_div = self._sub_clock_div * (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[time_base_h])
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
+                    self._TM0_div = self._sub_clock_div * (SUB_CLOCK // 128)
+                elif (self._port_read("CD") & 0x02):
+                        self._TM0_div = self._sub_clock_div
+            elif (srcA == SFR_TIMER_CTRL_CNT0_SRCA_ROSC):
+                if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_VDD):
+                    self._TM0_div = 1
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
+                    time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK
+                    self._TM0_div = (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[time_base_h])
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
+                    self._TM0_div = (SUB_CLOCK // 128)
+                elif (self._port_read("CD") & 0x02):
+                        self._TM0_div = 1
+            elif (srcA == SFR_TIMER_CTRL_CNT0_SRCA_VDD):
+                if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
+                    time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK
+                    self._TM0_div = (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[time_base_h])
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
+                    self._TM0_div = (SUB_CLOCK // 128)
+            elif (self._port_read("CD") & 0x01):
+                if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
+                    time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK
+                    self._TM0_div = (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[time_base_h])
+                elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
+                    self._TM0_div = (SUB_CLOCK // 128)
+
+        else:
+            if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_TIMER1):
+                self._TM0_div = self._TM1_div * (0x10000 - self._TM1_PRELOAD)
+            else:
+                self._TM0_div = 1
+
+        self._update_audio_div()
 
     def _timers_clock(self, exec_cycles):
         if (self._TIMER_CTRL & SFR_TIMER_CTRL_ENABLE):
-            self._TM0_counter -= exec_cycles
-            while (self._TM0_counter <= 0):
-                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_COUNTER_MODE):
-                    #TODO: add support for the other counter sources
-                    srcB = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCB_MASK
-                    srcA = self._TIMER_CTRL & SFR_TIMER_CTRL_CNT0_SRCA_MASK
-                    if (srcA == SFR_TIMER_CTRL_CNT0_SRCA_CLK32):
-                        if (srcB == SFR_TIMER_CTRL_CNT0_SRCB_VDD):
-                            self._TM0_counter += self._sub_clock_div
-                        elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_TIMEBASEH):
-                            self._TM0_counter += self._sub_clock_div * (SUB_CLOCK // 64) * (SFR_TIMEBASE_H_TBL[(self._TIME_BASE & SFR_TIMEBASE_H_MASK)])
-                        elif (srcB == SFR_TIMER_CTRL_CNT0_SRCB_CLK128):
-                            self._TM0_counter += self._sub_clock_div * (SUB_CLOCK // 128)
-                        else:
-                            self._TM0_counter += self._sub_clock_div
-                            if not(self._port_read("CD") & 0x02):
-                                break
-                        self._TM0 += 1
-                    elif (srcA == SFR_TIMER_CTRL_CNT0_SRCA_ROSC):
-                        self._TM0_counter = 1
-                        self._TM0 += exec_cycles
-                else:
-                    #TODO: add support for the other timer sources
-                    if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM0_MASK == SFR_TIMER_CTRL_TM0_ROSC):
-                        self._TM0_counter = 1
-                        self._TM0 += exec_cycles
+            if (self._TM0_div):
+                self._TM0_counter -= exec_cycles
+                while (self._TM0_counter <= 0):
+                    self._TM0_counter += self._TM0_div
+                    self._TM0 += 1
 
-                while (self._TM0 > 0xFFFF):
-                    self._TM0 -= 0x10000 - self._TM0_PRELOAD
-                    self._IREQ |= SFR_INT_CTRL_TIMER0
-                    self._WAKEUPREQ |= SFR_WAKEUP_CTRL_TIMER0 & self._WAKEUP_CTRL
-
-                    if (self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH0_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        self._sound.toggle(0)
+                    if (self._TM0 > 0xFFFF):
+                        self._TM0 = self._TM0_PRELOAD
+                        self._IREQ |= SFR_INT_CTRL_TIMER0
+                        self._WAKEUPREQ |= SFR_WAKEUP_CTRL_TIMER0 & self._WAKEUP_CTRL
 
             self._TM1_counter -= exec_cycles
             while (self._TM1_counter <= 0):
-                if (self._TIMER_CTRL & SFR_TIMER_CTRL_TM1_32K):
-                    self._TM1_counter += self._sub_clock_div
-                    self._TM1 += 1
-                else:
-                    self._TM1_counter = 1
-                    self._TM1 += exec_cycles
+                self._TM1_counter += self._TM1_div
+                self._TM1 += 1
 
-                while (self._TM1 > 0xFFFF):
-                    self._TM1 -= 0x10000 - self._TM1_PRELOAD
+                if (self._TM1 > 0xFFFF):
+                    self._TM1 = self._TM1_PRELOAD
 
                     if not(self._NMI_CTRL & SFR_NMI_CTRL_TIMER1):
                         self._NMI()
                     else:
                         self._IREQ |= SFR_INT_CTRL_TIMER1
 
-                    if (self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_AUDIO_ENBL and self._AUDIO_CH1_CTRL & SFR_AUDIO_CTRL_TONE_MODE):
-                        self._sound.toggle(1)
-
         self._T64HZ_counter -= exec_cycles
         while (self._T64HZ_counter <= 0):
             self._T64HZ_counter += self._sub_clock_div * (SUB_CLOCK // 64)
             self._T64HZ += 1
             
-            time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK            
+            time_base_h = self._TIME_BASE & SFR_TIMEBASE_H_MASK
             if (not(self._T64HZ & SFR_TIMEBASE_H_TBL[time_base_h])):
                 self._IREQ |= SFR_INT_CTRL_TIME_BASEH
                 self._WAKEUPREQ |= SFR_WAKEUP_CTRL_TIME_BASEH & self._WAKEUP_CTRL
@@ -675,8 +705,9 @@ class GPL191X():
                 
     def clock(self):
         if (self._CPU_ENBL):
-            opcode = self._read_mem(self._PC)
-            self._PC = (self._PC + 1) & 0xFFFF
+            pc = self._PC
+            self._PC = (pc + 1) & 0xFFFF
+            opcode = self._mem[(pc & 0x7FFF | self._BANK * (pc & 0x8000)) % self._mem_size]
             exec_cycles = self._execute[opcode](self) * self._CPU_DIV
             self._instr_counter += 1
             self._timers_clock(exec_cycles)
@@ -706,6 +737,7 @@ class GPL191X():
     def _set_sfr_io_portCD_dir(self, value):
         self._PDIR["CD"] = value
         self._interconnect.emit_port(self, "CD", self._port_read("CD"), 1)
+        self._update_timers_div()
 
     def _get_sfr_io_portCD_data(self):
         return self._port_read("CD")
@@ -713,6 +745,7 @@ class GPL191X():
     def _set_sfr_io_portCD_data(self, value):
         self._PLATCH["CD"] = value
         self._interconnect.emit_port(self, "CD", self._port_read("CD"), 1)
+        self._update_timers_div()
     
     def _set_sfr_io_portEF_dir(self, value):
         #self._PDIR["EF"] = value 
@@ -732,6 +765,7 @@ class GPL191X():
 
     def _set_sfr_audio_ch0_ctrl(self, value):
         self._AUDIO_CH0_CTRL = value
+        self._update_audio_div()
 
     def _get_sfr_audio_ch0_data(self):
         return 0
@@ -739,12 +773,14 @@ class GPL191X():
     def _set_sfr_audio_ch0_data(self, value):
         self._AUDIO_CH0_DATA = value
         self._sound.set_data(0, self._AUDIO_CH0_CTRL, value)
+        self._update_audio_div()
 
     def _get_sfr_audio_ch1_ctrl(self):
         return self._AUDIO_CH1_CTRL
 
     def _set_sfr_audio_ch1_ctrl(self, value):
         self._AUDIO_CH1_CTRL = value
+        self._update_audio_div()
 
     def _get_sfr_audio_ch1_data(self):
         return 0
@@ -752,12 +788,13 @@ class GPL191X():
     def _set_sfr_audio_ch1_data(self, value):
         self._AUDIO_CH1_DATA = value
         self._sound.set_data(1, self._AUDIO_CH1_CTRL, value)
+        self._update_audio_div()
 
     def _get_sfr_bank_sel(self):
-        return self._ROM_BANK >> 15
+        return self._BANK
     
     def _set_sfr_bank_sel(self, value):
-        self._ROM_BANK = (value & 0x03) << 15
+        self._BANK = (value & 0x03)
 
     def _get_sfr_wakeup_ctrl(self):
         return self._WAKEUPREQ
@@ -771,9 +808,11 @@ class GPL191X():
     
     def _set_sfr_timer_timebase_sel(self, value):
         self._TIME_BASE = value
+        self._update_timers_div()
     
     def _set_sfr_timer_ctrl(self, value):
         self._TIMER_CTRL = value
+        self._update_timers_div()
     
     def _set_sfr_clk_32768_en(self, value):
         self._CLK32K_ENABLE = value
@@ -845,24 +884,16 @@ class GPL191X():
         pass
     
     def _write_mem(self, addr, value):
-        if ((addr >= CPU_RAM_OFFSET) and (addr < RAM_SIZE + CPU_RAM_OFFSET)):
-            self._RAM[addr - CPU_RAM_OFFSET] = value
-        elif ((addr >= DPRAM_OFFSET) and (addr < DPRAM_SIZE + DPRAM_OFFSET)):
-            self._DPRAM[addr - DPRAM_OFFSET] = value
+        if ((addr >= CPU_RAM_OFFSET) and (addr < DPRAM_SIZE + DPRAM_OFFSET)):
+            self._mem[addr % self._mem_size] = value
         else:
             io = self._sfr_tbl.get(addr)
             if (io != None):
                 io[1](self, value)
 
     def _read_mem(self, addr):
-        if (addr >= ROM_BANK_OFFSET):
-            return self._ROM.get_byte((addr & 0x7FFF) | self._ROM_BANK)
-        elif (addr >= ROM_OFFSET):
-            return self._ROM.get_byte(addr & 0x7FFF)
-        elif (addr >= DPRAM_OFFSET):
-            return self._DPRAM[addr - DPRAM_OFFSET]
-        elif ((addr >= CPU_RAM_OFFSET) and (addr < RAM_SIZE + CPU_RAM_OFFSET)):
-            return self._RAM[addr - CPU_RAM_OFFSET]
+        if (addr >= CPU_RAM_OFFSET):
+            return self._mem[(addr & 0x7FFF | self._BANK * (addr & 0x8000)) % self._mem_size]
         else:
             io = self._sfr_tbl.get(addr)
             if (io != None):
